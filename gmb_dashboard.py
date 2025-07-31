@@ -327,15 +327,16 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.subheader("📤 Export Data")
     
+    # Initialize data variables
+    total_insights = pd.DataFrame()
+    all_reviews = pd.DataFrame()
+    
     # Main content area
     if selected_location == 'All Locations':
         # Summary view for all locations
         st.header("📈 Overview Dashboard")
         
         # Aggregate metrics
-        total_insights = pd.DataFrame()
-        all_reviews = pd.DataFrame()
-        
         for _, location in filtered_locations.iterrows():
             insights = st.session_state.gmb_analytics.get_insights(
                 location['id'], start_date, end_date
@@ -662,12 +663,36 @@ def main():
         export_data = {
             'date_range': f"{start_date} to {end_date}",
             'summary_metrics': {
-                'total_search_impressions': total_insights['search_impressions'].sum() if 'total_insights' in locals() and not total_insights.empty else 0,
-                'total_map_impressions': total_insights['map_impressions'].sum() if 'total_insights' in locals() and not total_insights.empty else 0,
-                'total_website_clicks': total_insights['website_clicks'].sum() if 'total_insights' in locals() and not total_insights.empty else 0,
-                'total_phone_calls': total_insights['phone_calls'].sum() if 'total_insights' in locals() and not total_insights.empty else 0,
-                'average_rating': all_reviews['rating'].mean() if 'all_reviews' in locals() and not all_reviews.empty else 0,
-                'total_reviews': len(all_reviews) if 'all_reviews' in locals() else 0
+                'total_search_impressions': total_insights['search_impressions'].sum() if not total_insights.empty else 0,
+                'total_map_impressions': total_insights['map_impressions'].sum() if not total_insights.empty else 0,
+                'total_website_clicks': total_insights['website_clicks'].sum() if not total_insights.empty else 0,
+                'total_phone_calls': total_insights['phone_calls'].sum() if not total_insights.empty else 0,
+                'average_rating': all_reviews['rating'].mean() if not all_reviews.empty else 0,
+                'total_reviews': len(all_reviews) if not all_reviews.empty else 0
+            }
+        }
+        
+        pdf_buffer = create_pdf_report(export_data, "gmb_report.pdf")
+        
+        st.sidebar.download_button(
+            label="📥 Download PDF Report",
+            data=pdf_buffer,
+            file_name=f"gmb_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            mime="application/pdf"
+        )
+    
+    if st.sidebar.button("📈 Generate Excel Report"):
+        # Prepare data for Excel export
+        export_data = {
+            'insights_data': total_insights if not total_insights.empty else pd.DataFrame(),
+            'reviews_data': all_reviews if not all_reviews.empty else pd.DataFrame(),
+            'summary_metrics': {
+                'total_search_impressions': total_insights['search_impressions'].sum() if not total_insights.empty else 0,
+                'total_map_impressions': total_insights['map_impressions'].sum() if not total_insights.empty else 0,
+                'total_website_clicks': total_insights['website_clicks'].sum() if not total_insights.empty else 0,
+                'total_phone_calls': total_insights['phone_calls'].sum() if not total_insights.empty else 0,
+                'average_rating': all_reviews['rating'].mean() if not all_reviews.empty else 0,
+                'total_reviews': len(all_reviews) if not all_reviews.empty else 0
             }
         }
         
@@ -690,28 +715,4 @@ def main():
     """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
-    main() total_insights['phone_calls'].sum() if 'total_insights' in locals() and not total_insights.empty else 0,
-                'average_rating': all_reviews['rating'].mean() if 'all_reviews' in locals() and not all_reviews.empty else 0,
-                'total_reviews': len(all_reviews) if 'all_reviews' in locals() else 0
-            }
-        }
-        
-        pdf_buffer = create_pdf_report(export_data, "gmb_report.pdf")
-        
-        st.sidebar.download_button(
-            label="📥 Download PDF Report",
-            data=pdf_buffer,
-            file_name=f"gmb_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-            mime="application/pdf"
-        )
-    
-    if st.sidebar.button("📈 Generate Excel Report"):
-        # Prepare data for Excel export
-        export_data = {
-            'insights_data': total_insights if 'total_insights' in locals() and not total_insights.empty else pd.DataFrame(),
-            'reviews_data': all_reviews if 'all_reviews' in locals() and not all_reviews.empty else pd.DataFrame(),
-            'summary_metrics': {
-                'total_search_impressions': total_insights['search_impressions'].sum() if 'total_insights' in locals() and not total_insights.empty else 0,
-                'total_map_impressions': total_insights['map_impressions'].sum() if 'total_insights' in locals() and not total_insights.empty else 0,
-                'total_website_clicks': total_insights['website_clicks'].sum() if 'total_insights' in locals() and not total_insights.empty else 0,
-                'total_phone_calls':
+    main()
