@@ -20,6 +20,9 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 import tempfile
+import pickle
+import time
+from google.oauth2.credentials import Credentials
 
 # Set page config
 st.set_page_config(
@@ -73,35 +76,331 @@ class GMBAnalytics:
     def __init__(self):
         self.service = None
         self.credentials = None
+        self.SCOPES = ['https://www.googleapis.com/auth/business.manage']
         
-    def authenticate(self, credentials_info):
-        """Authenticate with Google My Business API"""
+    def get_oauth_flow(self):
+        """Create OAuth2 flow"""
         try:
-            # This would normally use OAuth2 flow
-            # For demo purposes, we'll simulate the connection
-            st.success("✅ Connected to Google My Business API")
+            # Get OAuth2 credentials from secrets
+            oauth_config = {
+                "web": {
+                    "client_id": st.secrets["oauth2"]["client_id"],
+                    "client_secret": st.secrets["oauth2"]["client_secret"],
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": [st.secrets["oauth2"]["redirect_uri"]]
+                }
+            }
+            
+            flow = Flow.from_client_config(
+                oauth_config,
+                scopes=self.SCOPES,
+                redirect_uri=st.secrets["oauth2"]["redirect_uri"]
+            )
+            return flow
+        except Exception as e:
+            st.error(f"Failed to create OAuth flow: {str(e)}")
+            return None
+    
+    def get_auth_url(self):
+        """Get authorization URL"""
+        flow = self.get_oauth_flow()
+        if flow:
+            auth_url, _ = flow.authorization_url(
+                access_type='offline',
+                include_granted_scopes='true',
+                prompt='consent'
+            )
+            return auth_url
+        return None
+    
+    def authenticate_with_code(self, auth_code):
+        """Authenticate using authorization code"""
+        try:
+            flow = self.get_oauth_flow()
+            if not flow:
+                return False
+            
+            # Exchange authorization code for credentials
+            flow.fetch_token(code=auth_code)
+            self.credentials = flow.credentials
+            
+            # Build the service
+            self.service = build('mybusinessbusinessinformation', 'v1', 
+                               credentials=self.credentials)
+            
+            # Store credentials in session state for persistence
+            st.session_state['gmb_credentials'] = {
+                'token': self.credentials.token,
+                'refresh_token': self.credentials.refresh_token,
+                'token_uri': self.credentials.token_uri,
+                'client_id': self.credentials.client_id,
+                'client_secret': self.credentials.client_secret,
+                'scopes': self.credentials.scopes
+            }
+            
             return True
+            
         except Exception as e:
             st.error(f"Authentication failed: {str(e)}")
             return False
     
+    def load_credentials_from_session(self):
+        """Load credentials from session state"""
+        try:
+            if 'gmb_credentials' in st.session_state:
+                cred_data = st.session_state['gmb_credentials']
+                self.credentials = Credentials(
+                    token=cred_data['token'],
+                    refresh_token=cred_data['refresh_token'],
+                    token_uri=cred_data['token_uri'],
+                    client_id=cred_data['client_id'],
+                    client_secret=cred_data['client_secret'],
+                    scopes=cred_data['scopes']
+                )
+                
+                # Refresh if needed
+                if self.credentials.expired:
+                    self.credentials.refresh(Request())
+                    # Update session state with new token
+                    st.session_state['gmb_credentials']['token'] = self.credentials.token
+                
+                # Build services
+                self.service = build('mybusinessbusinessinformation', 'v1', 
+                                   credentials=self.credentials)
+                
+                return True
+        except Exception as e:
+            st.error(f"Failed to load credentials: {str(e)}")
+            if 'gmb_credentials' in st.session_state:
+                del st.session_state['gmb_credentials']
+        
+        return False
+    
+    def get_accounts(self):
+        """Get Google My Business accounts"""
+        try:
+            if not self.service:
+                return []
+            
+            # Call the API to get accounts
+            accounts = self.service.accounts().list().execute()
+            return accounts.get('accounts', [])
+            
+        except Exception as e:
+            st.error(f"Failed to get accounts: {str(e)}")
+            return []
+    
     def get_locations(self):
         """Get all business locations"""
-        # Simulated data for demo
-        return [
-            {"id": "loc_1", "name": "Downtown Store", "brand": "Brand A"},
-            {"id": "loc_2", "name": "Mall Location", "brand": "Brand A"},
-            {"id": "loc_3", "name": "Airport Store", "brand": "Brand B"},
-            {"id": "loc_4", "name": "Suburb Branch", "brand": "Brand B"},
-        ]
+        try:
+            if not self.service:
+                return []
+            
+            all_locations = []
+            accounts = self.get_accounts()
+            
+            for account in accounts:
+                account_name = account['name']
+                
+                # Get locations for this account
+                try:
+                    locations_response = self.service.accounts().locations().list(
+                        parent=account_name
+                    ).execute()
+                    
+                    locations = locations_response.get('locations', [])
+                    
+                    for location in locations:
+                        all_locations.append({
+                            'id': location['name'],
+                            'name': location.get('title', 'Unknown Location'),
+                            'brand': account.get('accountName', 'Unknown Brand'),
+                            'address': self._format_address(location.get('storefrontAddress', {})),
+                            'phone': location.get('primaryPhone', ''),
+                            'website': location.get('websiteUri', ''),
+                            'account_id': account_name
+                        })
+                        
+                except Exception as loc_error:
+                    st.warning(f"Could not fetch locations for account {account.get('accountName', 'Unknown')}: {str(loc_error)}")
+                    continue
+            
+            return all_locations
+            
+        except Exception as e:
+            st.error(f"Failed to get locations: {str(e)}")
+            # Return demo data as fallback
+            return self._get_demo_locations()
+    
+    def _format_address(self, address):
+        """Format address object to string"""
+        if not address:
+            return ""
+        
+        parts = []
+        if address.get('addressLines'):
+            parts.extend(address['addressLines'])
+        if address.get('locality'):
+            parts.append(address['locality'])
+        if address.get('administrativeArea'):
+            parts.append(address['administrativeArea'])
+        if address.get('postalCode'):
+            parts.append(address['postalCode'])
+            
+        return ', '.join(parts)
     
     def get_insights(self, location_id, start_date, end_date):
         """Get insights data for a location"""
-        # Simulated insights data
+        try:
+            if not self.service:
+                return self._get_demo_insights(location_id, start_date, end_date)
+            
+            # Build insights service
+            insights_service = build('mybusinessbusinessinformation', 'v1', 
+                                   credentials=self.credentials)
+            
+            # Format dates for API
+            start_date_str = start_date.strftime('%Y-%m-%d')
+            end_date_str = end_date.strftime('%Y-%m-%d')
+            
+            # Request insights data
+            request_body = {
+                'locationNames': [location_id],
+                'basicRequest': {
+                    'metricRequests': [
+                        {'metric': 'QUERIES_DIRECT'},
+                        {'metric': 'QUERIES_INDIRECT'},
+                        {'metric': 'VIEWS_MAPS'},
+                        {'metric': 'VIEWS_SEARCH'},
+                        {'metric': 'ACTIONS_WEBSITE'},
+                        {'metric': 'ACTIONS_PHONE'},
+                        {'metric': 'ACTIONS_DRIVING_DIRECTIONS'},
+                        {'metric': 'PHOTOS_VIEWS_MERCHANT'},
+                        {'metric': 'PHOTOS_VIEWS_CUSTOMERS'}
+                    ],
+                    'timeRange': {
+                        'startTime': start_date_str + 'T00:00:00Z',
+                        'endTime': end_date_str + 'T23:59:59Z'
+                    }
+                }
+            }
+            
+            # Make API call to get insights
+            insights_response = insights_service.accounts().locations().getInsights(
+                name=location_id,
+                body=request_body
+            ).execute()
+            
+            # Process the response into DataFrame
+            return self._process_insights_response(insights_response, location_id, start_date, end_date)
+            
+        except Exception as e:
+            st.warning(f"Could not fetch real insights data: {str(e)}. Using demo data.")
+            return self._get_demo_insights(location_id, start_date, end_date)
+    
+    def _process_insights_response(self, response, location_id, start_date, end_date):
+        """Process insights API response into DataFrame"""
+        try:
+            # Extract metrics from response
+            location_metrics = response.get('locationMetrics', [])
+            if not location_metrics:
+                return self._get_demo_insights(location_id, start_date, end_date)
+            
+            metrics = location_metrics[0].get('metricValues', [])
+            
+            # Create daily data structure
+            days = (end_date - start_date).days + 1
+            dates = [start_date + timedelta(days=i) for i in range(days)]
+            
+            # Initialize data dictionary
+            data = {
+                'date': dates,
+                'search_impressions': [0] * days,
+                'map_impressions': [0] * days,
+                'website_clicks': [0] * days,
+                'direction_requests': [0] * days,
+                'phone_calls': [0] * days,
+                'photo_views': [0] * days,
+                'location_id': [location_id] * days
+            }
+            
+            # Process each metric
+            for metric in metrics:
+                metric_name = metric.get('metric', '')
+                daily_values = metric.get('dimensionalValues', [])
+                
+                for i, daily_value in enumerate(daily_values[:days]):
+                    value = int(daily_value.get('value', 0))
+                    
+                    if metric_name in ['VIEWS_SEARCH', 'QUERIES_DIRECT', 'QUERIES_INDIRECT']:
+                        data['search_impressions'][i] += value
+                    elif metric_name == 'VIEWS_MAPS':
+                        data['map_impressions'][i] = value
+                    elif metric_name == 'ACTIONS_WEBSITE':
+                        data['website_clicks'][i] = value
+                    elif metric_name == 'ACTIONS_DRIVING_DIRECTIONS':
+                        data['direction_requests'][i] = value
+                    elif metric_name == 'ACTIONS_PHONE':
+                        data['phone_calls'][i] = value
+                    elif metric_name in ['PHOTOS_VIEWS_MERCHANT', 'PHOTOS_VIEWS_CUSTOMERS']:
+                        data['photo_views'][i] += value
+            
+            return pd.DataFrame(data)
+            
+        except Exception as e:
+            st.warning(f"Error processing insights response: {str(e)}")
+            return self._get_demo_insights(location_id, start_date, end_date)
+    
+    def get_reviews(self, location_id):
+        """Get reviews for a location"""
+        try:
+            if not self.service:
+                return self._get_demo_reviews(location_id)
+            
+            # Build reviews service 
+            reviews_service = build('mybusinessbusinessinformation', 'v1', 
+                                  credentials=self.credentials)
+            
+            # Get reviews
+            reviews_response = reviews_service.accounts().locations().reviews().list(
+                parent=location_id
+            ).execute()
+            
+            reviews_data = []
+            reviews = reviews_response.get('reviews', [])
+            
+            for i, review in enumerate(reviews):
+                reviews_data.append({
+                    'id': i + 1,
+                    'author': review.get('reviewer', {}).get('displayName', 'Anonymous'),
+                    'rating': review.get('starRating', 0),
+                    'text': review.get('comment', ''),
+                    'date': review.get('createTime', '')[:10] if review.get('createTime') else '',
+                    'reply': review.get('reviewReply', {}).get('comment', '') if review.get('reviewReply') else ''
+                })
+            
+            return pd.DataFrame(reviews_data)
+            
+        except Exception as e:
+            st.warning(f"Could not fetch real reviews: {str(e)}. Using demo data.")
+            return self._get_demo_reviews(location_id)
+    
+    def _get_demo_locations(self):
+        """Return demo locations data"""
+        return [
+            {"id": "loc_1", "name": "Downtown Store", "brand": "Brand A", "address": "123 Main St, City, ST 12345", "phone": "(555) 123-4567"},
+            {"id": "loc_2", "name": "Mall Location", "brand": "Brand A", "address": "456 Mall Ave, City, ST 12345", "phone": "(555) 234-5678"},
+            {"id": "loc_3", "name": "Airport Store", "brand": "Brand B", "address": "789 Airport Rd, City, ST 12345", "phone": "(555) 345-6789"},
+            {"id": "loc_4", "name": "Suburb Branch", "brand": "Brand B", "address": "321 Suburb Ln, City, ST 12345", "phone": "(555) 456-7890"},
+        ]
+    
+    def _get_demo_insights(self, location_id, start_date, end_date):
+        """Return demo insights data"""
         import random
         import numpy as np
         
-        days = (end_date - start_date).days
+        days = (end_date - start_date).days + 1
         dates = [start_date + timedelta(days=i) for i in range(days)]
         
         return pd.DataFrame({
@@ -115,9 +414,8 @@ class GMBAnalytics:
             'location_id': location_id
         })
     
-    def get_reviews(self, location_id):
-        """Get reviews for a location"""
-        # Simulated reviews data
+    def _get_demo_reviews(self, location_id):
+        """Return demo reviews data"""
         reviews = [
             {"id": 1, "author": "John D.", "rating": 5, "text": "Excellent service! The staff was very helpful and friendly. Will definitely come back.", "date": "2024-07-20"},
             {"id": 2, "author": "Sarah M.", "rating": 4, "text": "Good experience overall. The product quality is great but the wait time was a bit long.", "date": "2024-07-18"},
@@ -247,52 +545,129 @@ def main():
     if not st.session_state.authenticated:
         st.header("🔐 Google My Business Authentication")
         
+        # Check if we can load existing credentials
+        gmb = st.session_state.gmb_analytics
+        if gmb.load_credentials_from_session():
+            st.session_state.authenticated = True
+            st.rerun()
+        
         col1, col2 = st.columns([2, 1])
         
         with col1:
             st.markdown("""
             ### Connect Your Google My Business Account
             
-            To use this dashboard, you need to authenticate with your Google My Business account.
+            To use this dashboard with real data, authenticate with your Google My Business account.
             
-            **Required Setup:**
+            **Setup Steps:**
             1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-            2. Create a new project or select existing one
-            3. Enable Google My Business API
-            4. Create OAuth2 credentials
-            5. Download the credentials JSON file
+            2. Create/select project and enable Google My Business APIs
+            3. Create OAuth2 credentials for web application
+            4. Add your Streamlit app URL as authorized redirect URI
+            5. Configure secrets in Streamlit Cloud
             """)
             
-            # File uploader for credentials
-            uploaded_file = st.file_uploader(
-                "Upload your Google credentials JSON file",
-                type=['json'],
-                help="Upload the credentials.json file from Google Cloud Console"
-            )
+            # OAuth2 Authentication Flow
+            st.subheader("🔗 OAuth2 Authentication")
             
-            if uploaded_file is not None:
-                if st.button("🚀 Connect to Google My Business", type="primary"):
-                    # In production, you would use the uploaded credentials
-                    # For demo, we'll simulate successful authentication
-                    st.session_state.authenticated = True
-                    st.rerun()
+            # Check if we have OAuth2 configured
+            try:
+                oauth_configured = (
+                    "oauth2" in st.secrets and 
+                    "client_id" in st.secrets["oauth2"] and 
+                    "client_secret" in st.secrets["oauth2"]
+                )
+            except:
+                oauth_configured = False
+            
+            if oauth_configured:
+                # Step 1: Get authorization URL
+                if st.button("🚀 Start Google Authentication", type="primary"):
+                    auth_url = gmb.get_auth_url()
+                    if auth_url:
+                        st.markdown(f"""
+                        **Step 1:** Click the link below to authorize this app:
+                        
+                        [🔐 Authorize with Google My Business]({auth_url})
+                        
+                        **Step 2:** After authorization, copy the code from the redirect URL and paste it below.
+                        """)
+                        st.session_state.show_auth_code_input = True
+                
+                # Step 2: Handle authorization code
+                if st.session_state.get('show_auth_code_input', False):
+                    st.markdown("---")
+                    auth_code = st.text_input(
+                        "📋 Paste the authorization code here:",
+                        placeholder="Enter the code from the redirect URL...",
+                        help="After clicking the authorization link above, you'll be redirected to a URL with a 'code' parameter. Copy and paste that code here."
+                    )
+                    
+                    if auth_code and st.button("✅ Complete Authentication"):
+                        with st.spinner("Authenticating with Google My Business..."):
+                            if gmb.authenticate_with_code(auth_code):
+                                st.success("✅ Successfully authenticated with Google My Business!")
+                                st.session_state.authenticated = True
+                                st.session_state.show_auth_code_input = False
+                                st.balloons()
+                                time.sleep(2)
+                                st.rerun()
+                            else:
+                                st.error("❌ Authentication failed. Please check your authorization code and try again.")
+            
+            else:
+                st.error("""
+                ❌ **OAuth2 not configured**
+                
+                Please configure your OAuth2 credentials in Streamlit secrets:
+                
+                ```toml
+                [oauth2]
+                client_id = "your-client-id.apps.googleusercontent.com"
+                client_secret = "your-client-secret"
+                redirect_uri = "https://your-app.streamlit.app"
+                ```
+                """)
         
         with col2:
             st.info("""
             **Demo Mode Available**
             
-            You can explore the dashboard with sample data without authentication.
+            Explore the dashboard with sample data without authentication.
             """)
             
             if st.button("📊 Use Demo Data", type="secondary"):
                 st.session_state.authenticated = True
                 st.session_state.demo_mode = True
+                st.success("✅ Demo mode activated!")
                 st.rerun()
+            
+            st.markdown("---")
+            
+            st.markdown("""
+            **🔧 Need Help?**
+            
+            - [Google My Business API Setup Guide](https://developers.google.com/my-business/content/prereqs)
+            - [OAuth2 Setup Instructions](https://developers.google.com/identity/protocols/oauth2)
+            - Check the README for detailed setup steps
+            """)
         
         return
     
     # Main Dashboard
-    st.success("✅ Connected to Google My Business API")
+    if st.session_state.get('demo_mode', False):
+        st.info("📊 **Demo Mode Active** - Using sample data for demonstration")
+    else:
+        st.success("✅ Connected to Google My Business API")
+        
+        # Display connected account info
+        try:
+            accounts = st.session_state.gmb_analytics.get_accounts()
+            if accounts:
+                account_names = [acc.get('accountName', 'Unknown') for acc in accounts[:3]]
+                st.caption(f"Connected accounts: {', '.join(account_names)}")
+        except:
+            pass
     
     # Sidebar Controls
     st.sidebar.header("📋 Dashboard Controls")
